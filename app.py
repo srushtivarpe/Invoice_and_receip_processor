@@ -10,6 +10,8 @@ from google import genai
 import requests
 
 
+# --- Tesseract Path ---
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # --- Config ---
 st.set_page_config(page_title="AI Document Orchestrator", layout="wide")
