@@ -12,7 +12,7 @@ import requests
 
 # --- Config ---
 st.set_page_config(page_title="AI Document Orchestrator", layout="wide")
-st.title("📄 AI Document Orchestrator (Stable Version)")
+st.title("📄 AI Document Orchestrator - Invoice & Receipt Processor")
 
 # --- Secrets ---
 GEMINI_API_KEY = st.secrets.get("gemini_api_key", "")
@@ -78,7 +78,7 @@ def call_gemini(text):
         return None
     try:
         response = client.models.generate_content(
-            model="gemini-1.0-pro",
+            model="gemini-1.5-flash",
             contents=f"""
 Extract structured data in JSON:
 
