@@ -30,6 +30,28 @@ def clean_text(text):
     text = re.sub(r'[^\x00-\x7F]+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.lower()
+# ---------------- CLEAN TEXT ----------------
+def clean_text(text):
+    text = re.sub(r'[^\x00-\x7F]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.lower()
+
+
+# ---------------- DATE EXTRACTION ----------------
+def extract_date(text):
+    # Strict formats like: 20 April 2024
+    match = re.search(r'\b\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b', text, re.IGNORECASE)
+    
+    if match:
+        return match.group()
+
+    # Format: 20/04/2024 or 20-04-2024
+    match = re.search(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b', text)
+    
+    if match:
+        return match.group()
+
+    return "Unknown"
 
 # ---------------- EXTRACTION ----------------
 def extract_fields(text):
@@ -40,8 +62,7 @@ def extract_fields(text):
     invoice_no = inv_match.group().upper() if inv_match else "Unknown"
 
     # Date
-    date_match = re.search(r'\d{1,2}\s+\w+\s+\d{4}', cleaned)
-    date = date_match.group() if date_match else "Unknown"
+    date = extract_date(cleaned)
 
     # Vendor
     vendor_match = re.search(r'abc tech solutions pvt ltd', cleaned)
