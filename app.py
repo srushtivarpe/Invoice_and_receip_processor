@@ -1,237 +1,174 @@
 import streamlit as st
-import pandas as pd
-from PIL import Image
 import pytesseract
-from datetime import datetime
+from PIL import Image
+from pdf2image import convert_from_bytes
+import google.generativeai as genai
 import json
 import re
-from pdf2image import convert_from_bytes
-from google import genai
 import requests
 
+# ---------------- CONFIG ----------------
+GEMINI_API_KEY = "YOUR_API_KEY"
+N8N_WEBHOOK_URL = "YOUR_WEBHOOK_URL"
 
-# --- Config ---
-st.set_page_config(page_title="AI Document Orchestrator", layout="wide")
-st.title("📄 AI Document Orchestrator - Invoice & Receipt Processor")
+pytesseract.pytesseract.tesseract_cmd = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 
-# --- Secrets ---
-GEMINI_API_KEY = st.secrets.get("gemini_api_key", "")
-N8N_WEBHOOK_URL = st.secrets.get("n8n_webhook_url", "")
+genai.configure(api_key=GEMINI_API_KEY)
 
-# --- Gemini Client ---
-client = None
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-    except:
-        client = None
+# ---------------- PROMPT ----------------
+PROMPT = """
+Extract structured invoice data from the following text.
 
-# --- Session ---
-if "history" not in st.session_state:
-    st.session_state.history = []
+Return ONLY valid JSON. No explanation.
 
-# --- Upload ---
-files = st.file_uploader(
-    "Upload Documents (PDF / Image)",
-    type=["jpg", "png", "jpeg", "pdf"],
-    accept_multiple_files=True
-)
+Fields required:
+- Vendor
+- Invoice Number
+- Date
+- Total Amount
+- Email
 
-# --- OCR ---
-def ocr_image(img):
-    return pytesseract.image_to_string(img)
+Rules:
+- Do NOT extract phone numbers as date
+- Do NOT return 'INVOICE' as invoice number
+- Total Amount must be numeric only
+- If not found return "N/A"
 
-def ocr_pdf(file):
-    try:
-        pages = convert_from_bytes(file.read(), first_page=1, last_page=2)
-        text = ""
-        for p in pages:
-            text += pytesseract.image_to_string(p)
-        return text
-    except:
-        return ""
+Format:
+{
+  "Vendor": "",
+  "Invoice Number": "",
+  "Date": "",
+  "Total Amount": "",
+  "Email": ""
+}
+
+Text:
+"""
+
+# ---------------- FUNCTIONS ----------------
 
 def extract_text(file):
     if file.type == "application/pdf":
-        return ocr_pdf(file)
+        images = convert_from_bytes(file.read())
+        text = ""
+        for img in images:
+            text += pytesseract.image_to_string(img)
+        return text
     else:
-        return ocr_image(Image.open(file))
+        image = Image.open(file)
+        return pytesseract.image_to_string(image)
 
-# --- Clean ---
-def clean_amount(val):
-    return re.sub(r"[^\d.]", "", str(val))
 
-# --- Fallback Extraction ---
-def fallback_extraction(text):
-    return {
-        "Document Type": "Invoice" if "invoice" in text.lower() else "Receipt",
-        "Vendor": re.findall(r"[A-Z][A-Za-z ]+(?:Ltd|Pvt|Solutions|Enterprises)", text)[0] if re.findall(r"[A-Z][A-Za-z ]+(?:Ltd|Pvt|Solutions|Enterprises)", text) else "Unknown",
-        "Invoice Number": re.findall(r"INV[-\w]+", text)[0] if re.findall(r"INV[-\w]+", text) else "N/A",
-        "Date": re.findall(r"\d{1,2}\s\w+\s\d{4}", text)[0] if re.findall(r"\d{1,2}\s\w+\s\d{4}", text) else "N/A",
-        "Total Amount": clean_amount(re.findall(r"Total.*?([\d,]+\.\d+)", text)[0] if re.findall(r"Total.*?([\d,]+\.\d+)", text) else "0"),
-        "Taxes": clean_amount(re.findall(r"GST.*?([\d,]+\.\d+)", text)[0] if re.findall(r"GST.*?([\d,]+\.\d+)", text) else "0"),
-    }
-
-# --- Gemini ---
-def call_gemini(text):
-    if not client:
-        return None
+def extract_json(text):
     try:
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=f"""
-Extract structured data in JSON:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(PROMPT + text)
 
-{{
-"Document Type": "",
-"Vendor": "",
-"Invoice Number": "",
-"Date": "",
-"Total Amount": "",
-"Taxes": ""
-}}
+        raw = response.text.strip()
 
-Text:
-{text}
-"""
-        )
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
 
-        raw = response.text
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        json_text = raw[start:end]
+        data = json.loads(json_text)
 
-        if not match:
-            return None
-
-        data = json.loads(match.group())
-        data["Total Amount"] = clean_amount(data.get("Total Amount", "0"))
-        data["Taxes"] = clean_amount(data.get("Taxes", "0"))
         return data
 
-    except:
+    except Exception as e:
+        print("ERROR:", e)
+        return {}
+
+
+def clean_data(data):
+    # Amount cleanup
+    amount = data.get("Total Amount", "0")
+    amount = re.sub(r"[^\d.]", "", str(amount))
+    amount = float(amount) if amount else 0
+
+    # Date validation
+    date = data.get("Date", "N/A")
+    if re.search(r"\d{10}", str(date)):
+        date = "N/A"
+
+    # Invoice validation
+    invoice = data.get("Invoice Number", "N/A")
+    if str(invoice).strip().lower() == "invoice":
+        invoice = "N/A"
+
+    return {
+        "vendor": data.get("Vendor", "N/A"),
+        "invoice_number": invoice,
+        "date": date,
+        "amount": amount,
+        "email": data.get("Email", "test@gmail.com")
+    }
+
+
+def generate_alerts(data):
+    alerts = []
+
+    if data["amount"] > 5000:
+        alerts.append("High Value")
+
+    if data["vendor"] == "N/A":
+        alerts.append("Missing Vendor")
+
+    if data["amount"] == 0:
+        alerts.append("Invalid Amount")
+
+    return alerts
+
+
+def send_to_n8n(payload):
+    try:
+        response = requests.post(N8N_WEBHOOK_URL, json=payload)
+        return response.status_code
+    except Exception as e:
+        print("Webhook Error:", e)
         return None
 
-# --- Duplicate ---
-def is_duplicate(new):
-    return any(old.get("Invoice Number") == new.get("Invoice Number") for old in st.session_state.history)
+# ---------------- UI ----------------
 
-# --- n8n Trigger (Debugged Version) ---
-def trigger_n8n(data):
-    try:
-        amount = float(data.get("Total Amount", 0))
-        tax = float(data.get("Taxes", 0))
-        vendor = data.get("Vendor", "").strip().lower()
-        doc_type = data.get("Document Type", "").strip().lower()
-        invoice_no = data.get("Invoice Number", "").strip()
+st.title("📄 AI Invoice Processor")
 
-        approved_vendors = ["amazon", "flipkart", "abc tech solutions"]
+file = st.file_uploader("Upload Invoice", type=["pdf", "png", "jpg", "jpeg"])
 
-        alerts = []
+if file:
+    st.info("Processing...")
 
-        st.write("--- Debug trigger_n8n ---")
-        st.write(f"Vendor: {vendor}, Amount: {amount}, Taxes: {tax}, Doc Type: {doc_type}, Invoice No: {invoice_no}")
+    text = extract_text(file)
+    st.subheader("OCR Text")
+    st.write(text)
 
-        # --- Conditions ---
-        if amount > 10000:
-            alerts.append("High Value")
-        if amount > 50000:
-            alerts.append("URGENT: Very High Value")
-        if not invoice_no or invoice_no.upper() == "N/A":
-            alerts.append("Missing Invoice Number")
-        if vendor not in approved_vendors:
-            alerts.append("Unapproved Vendor")
-        if tax > 0.3 * amount:
-            alerts.append("High Tax Anomaly")
-        if is_duplicate(data):
-            alerts.append("Duplicate Invoice")
+    ai_data = extract_json(text)
+    st.subheader("AI Output")
+    st.write(ai_data)
 
-        if doc_type != "invoice":
-            st.write("Document is not an invoice → ignoring email trigger")
-            return False
+    cleaned = clean_data(ai_data)
+    alerts = generate_alerts(cleaned)
 
-        # --- Trigger Webhook ---
-        if alerts:
-            payload = {"alerts": alerts, "data": data}
-            st.write("Alerts triggered:", alerts)
-            try:
-                response = requests.post(N8N_WEBHOOK_URL, json=payload)
-                st.write("Webhook POST status:", response.status_code)
-                if response.status_code == 200:
-                    st.success("🚀 Email triggered via n8n")
-                else:
-                    st.error(f"Webhook returned status {response.status_code}")
-            except Exception as e:
-                st.error(f"Error sending webhook: {e}")
-            return True
-        else:
-            st.write("No alerts → email not sent")
-            return False
+    st.subheader("Final Structured Data")
+    st.write(cleaned)
 
-    except Exception as e:
-        st.error(f"n8n error: {e}")
-        return False
+    st.subheader("Alerts")
+    st.write(alerts)
 
-# --- Processing ---
-if files:
-    for file in files:
-        st.subheader(f"📄 {file.name}")
+    payload = {
+        "body": {
+            "data": {
+                "Vendor": cleaned["vendor"],
+                "Invoice Number": cleaned["invoice_number"],
+                "Date": cleaned["date"],
+                "Total Amount": cleaned["amount"]
+            },
+            "alerts": alerts
+        }
+    }
 
-        text = extract_text(file)
-        st.text_area("Extracted Text", text, height=150)
+    status = send_to_n8n(payload)
 
-        if st.button(f"Process {file.name}"):
-
-            data = call_gemini(text)
-
-            if data:
-                st.success("🤖 Gemini extraction successful")
-            else:
-                st.warning("⚠️ Gemini failed → Using fallback")
-                data = fallback_extraction(text)
-
-            # --- Classification ---
-            doc_type = data.get("Document Type", "Unknown")
-            if doc_type.lower() == "invoice":
-                st.success("📄 Invoice detected")
-            elif doc_type.lower() == "receipt":
-                st.info("🧾 Receipt detected")
-
-            # --- Duplicate ---
-            if is_duplicate(data):
-                st.warning("⚠️ Duplicate detected")
-
-            # --- Anomaly ---
-            amt = float(data.get("Total Amount", 0))
-            if amt > 20000:
-                st.error("🚨 High-value anomaly")
-
-            # --- n8n ---
-            trigger_n8n(data)
-
-            st.json(data)
-
-            data["Filename"] = file.name
-            data["Processed At"] = datetime.now()
-
-            st.session_state.history.append(data)
-
-# --- Dashboard ---
-if st.session_state.history:
-    st.header("📊 Dashboard")
-
-    df = pd.DataFrame(st.session_state.history)
-
-    min_amt = st.number_input("Minimum Amount", 0)
-    df = df[df["Total Amount"].astype(float) >= min_amt]
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Documents", len(df))
-    col2.metric("Total Amount", df["Total Amount"].astype(float).sum())
-    col3.metric("Invoices", len(df[df["Document Type"].str.lower() == "invoice"]))
-
-    st.dataframe(df, use_container_width=True)
-
-    st.download_button(
-        "Download CSV",
-        df.to_csv(index=False).encode("utf-8"),
-        "documents.csv"
-    )
+    if status == 200:
+        st.success("Sent to workflow successfully!")
+    else:
+        st.error("Failed to send to workflow")
