@@ -6,7 +6,7 @@ from datetime import datetime
 import json
 import re
 from pdf2image import convert_from_bytes
-import google.generativeai as genai
+from google import genai
 import requests
 
 
@@ -18,9 +18,13 @@ st.title("📄 AI Document Orchestrator - Invoice & Receipt Processor")
 GEMINI_API_KEY = st.secrets.get("gemini_api_key", "")
 N8N_WEBHOOK_URL = st.secrets.get("n8n_webhook_url", "")
 
-# --- Configure Gemini ---
+# --- Gemini Client ---
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    except:
+        client = None
 
 # --- Session ---
 if "history" not in st.session_state:
@@ -68,81 +72,42 @@ def fallback_extraction(text):
         "Taxes": clean_amount(re.findall(r"GST.*?([\d,]+\.\d+)", text)[0] if re.findall(r"GST.*?([\d,]+\.\d+)", text) else "0"),
     }
 
-PROMPT = """
-Extract structured invoice data from the following text.
-
-Return ONLY valid JSON. No explanation.
-
-Fields required:
-- Document Type (Invoice or Receipt)
-- Vendor
-- Invoice Number
-- Date
-- Total Amount
-- Taxes
-- Email
-
-Rules:
-- Do NOT extract phone numbers as date
-- Do NOT return "INVOICE" as invoice number
-- Total Amount must be numeric
-- If not found return "N/A"
-
-Format:
-{
-  "Document Type": "",
-  "Vendor": "",
-  "Invoice Number": "",
-  "Date": "",
-  "Total Amount": "",
-  "Taxes": "",
-  "Email": ""
-}
-
-Text:
-"""
 # --- Gemini ---
 def call_gemini(text):
-    if not GEMINI_API_KEY:
+    if not client:
         return None
-
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=f"""
+Extract structured data in JSON:
 
-        response = model.generate_content(PROMPT + text)
+{{
+"Document Type": "",
+"Vendor": "",
+"Invoice Number": "",
+"Date": "",
+"Total Amount": "",
+"Taxes": ""
+}}
 
-        raw = response.text.strip()
+Text:
+{text}
+"""
+        )
 
-        # Extract JSON
+        raw = response.text
         match = re.search(r"\{.*\}", raw, re.DOTALL)
+
         if not match:
             return None
 
         data = json.loads(match.group())
-
-        # -------- CLEANING -------- #
-
-        # Fix amount
-        amount = data.get("Total Amount", "0")
-        amount = re.sub(r"[^\d.]", "", str(amount))
-        data["Total Amount"] = amount if amount else "0"
-
-        # Fix date (avoid phone number)
-        date = data.get("Date", "N/A")
-        if re.search(r"\d{10}", str(date)):
-            date = "N/A"
-        data["Date"] = date
-
-        # Fix invoice number
-        inv = data.get("Invoice Number", "N/A")
-        if str(inv).strip().lower() == "invoice":
-            inv = "N/A"
-        data["Invoice Number"] = inv
-
+        data["Total Amount"] = clean_amount(data.get("Total Amount", "0"))
+        data["Taxes"] = clean_amount(data.get("Taxes", "0"))
         return data
 
-    except Exception as e:
-        st.error(f"Gemini Error: {e}")
+    except:
         return None
 
 # --- Duplicate ---
@@ -216,8 +181,6 @@ if files:
         if st.button(f"Process {file.name}"):
 
             data = call_gemini(text)
-            st.write("🔍 OCR TEXT:", text)
-            st.write("🤖 AI OUTPUT:", data)
 
             if data:
                 st.success("🤖 Gemini extraction successful")
@@ -272,3 +235,4 @@ if st.session_state.history:
         df.to_csv(index=False).encode("utf-8"),
         "documents.csv"
     )
+
