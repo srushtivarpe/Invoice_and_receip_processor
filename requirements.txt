@@ -1,0 +1,7 @@
+streamlit
+pandas
+pillow
+pytesseract
+pdf2image
+google-generativeai==0.3.2
+requests
