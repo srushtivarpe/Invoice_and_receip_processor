@@ -10,7 +10,7 @@ import pytesseract
 from pdf2image import convert_from_bytes
 
 # ---------------- CONFIG ----------------
-N8N_WEBHOOK_URL = "YOUR_N8N_WEBHOOK_URL"
+N8N_WEBHOOK_URL = "https://srushti-2002.app.n8n.cloud/webhook/b11299f0-8f78-42d3-9977-1dd03d8fa49a"
 approved_vendors = ["ABC Tech Solutions Pvt Ltd"]
 
 # ---------------- OCR ----------------
